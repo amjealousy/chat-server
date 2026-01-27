@@ -21,6 +21,7 @@ type MSGType string
 
 const (
 	Broadcast MSGType = "broadcast"
+	Mention   MSGType = "@"
 )
 
 type TypeMessage struct {

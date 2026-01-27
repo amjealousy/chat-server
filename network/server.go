@@ -12,9 +12,10 @@ import (
 	"wsl.test/chat"
 )
 
-func helloHandler(ctx *fasthttp.RequestCtx) {
-	name := "Kirill"
-	fmt.Fprintf(ctx, "Привет, %s!", name)
+func HealthHandler(ctx *fasthttp.RequestCtx) {
+	ctx.SetStatusCode(200)
+	ctx.SetContentType("text/plain; charset=utf-8")
+	ctx.SetBodyString(`{"alive": true}`)
 }
 func ChatCreateHandler(ctx *fasthttp.RequestCtx, controller *chat.Controller) {
 	ctx.SetContentType("application/json")
@@ -68,7 +69,7 @@ func NewServer() *Server {
 	server.logger = base.With(
 		slog.String("component", "HttpServer"),
 	)
-	server.route.GET("/hello", helloHandler)
+	server.route.GET("/health", HealthHandler)
 	server.route.GET("/ws", server.WSChatWrapper)
 	server.route.POST("/chat-server/create/{chatID}", server.ChatCreateWrapper)
 	server.route.POST("/user/create", server.UserCreateWrapper)

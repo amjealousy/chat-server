@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -15,6 +16,50 @@ type Controller struct {
 	mx     *sync.RWMutex
 	chats  map[string]*Chat
 	logger *slog.Logger
+	sentry *Sentry
+}
+type EventType = string
+
+const (
+	Completed EventType = "complete"
+	Failed    EventType = "failed"
+)
+
+type Event struct {
+	Type EventType `json:"type"`
+	Err  string    `json:"err"`
+}
+
+type Sentry struct {
+	mx        *sync.RWMutex
+	notifyMap map[string]chan Event
+}
+
+func NewSentry() *Sentry {
+	return &Sentry{&sync.RWMutex{}, make(map[string]chan Event)}
+}
+func (s *Sentry) Notify(userID string, ev Event) {
+	s.mx.RLock()
+	userC := s.notifyMap[userID]
+	s.mx.RUnlock()
+	select {
+	case userC <- ev:
+	default:
+	}
+
+}
+
+func (c *Controller) Subscribe(userId string, ch chan Event) error {
+	if _, ok := c.sentry.notifyMap[userId]; ok {
+		return errors.New("already subscribed")
+	}
+	if ch == nil {
+		return errors.New("nil channel")
+	}
+	c.sentry.mx.Lock()
+	c.sentry.notifyMap[userId] = ch
+	c.sentry.mx.Unlock()
+	return nil
 }
 
 func NewController(format io.Writer) *Controller {
@@ -69,24 +114,32 @@ func (c *Controller) delFromChat(invoice Invoice) {
 }
 
 func (c *Controller) addToChat(invoice Invoice) {
+	var event Event
 	if chat := c.chats[invoice.ChatID]; chat != nil {
 		c.mx.Lock()
 		defer c.mx.Unlock()
-		chat.AddMember(invoice.UserID)
+		status := chat.AddMember(invoice.UserID)
+		if status == false {
+			event.Type = Failed
+			event.Err = "failed to add to chat"
+		} else {
+			event.Type = Completed
+		}
+
 	} else {
 		c.logger.InfoContext(context.Background(), "The chat-server does not exist :", invoice.ChatID)
+		event.Type = Failed
+		event.Err = "chat-server does not exist"
 	}
+	c.sentry.Notify(invoice.UserID, event)
 }
-func (c *Controller) GetChatBroadcastChannel(chatID string, connection shared.IConnection) chan<- shared.TypeMessage {
+func (c *Controller) GetRegisterConnection(chatID string, connection shared.IConnection) chan<- shared.TypeMessage {
 	c.mx.RLock()
 	defer c.mx.RUnlock()
-	c.logger.InfoContext(context.Background(), "GetChatBroadcastChannel invoked")
-	c.logger.InfoContext(context.Background(), "Existed chats:", slog.Any("chats", c.chats))
+	c.logger.InfoContext(context.Background(), "[Controller.GetRegisterConnection] list of chats:", slog.Any("chats", c.chats))
 	if chat := c.chats[chatID]; chat != nil {
 		if member := chat.members[connection.GetUserId()]; member != nil {
-			member.AddConnection(connection)
-			go chat.reader(member)
-			return member.RequestChan
+			return chat.messageChan
 		}
 	}
 	c.logger.InfoContext(context.Background(), "Chat not found in", slog.String("chatID", chatID))
@@ -98,9 +151,12 @@ func (c *Controller) CreateChat(chatID string) bool {
 	if chat := c.chats[chatID]; chat != nil {
 		return false
 	}
-	c.chats[chatID] = NewChat(chatID)
+	c.chats[chatID] = NewChat(c, chatID)
 	return true
 }
 func (c *Controller) ConnectToChat(invoice Invoice) {
 	c.addCh <- invoice
 }
+func (c *Controller) SseConnect(invoice Invoice) {}
+
+type CallBack func()

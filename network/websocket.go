@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/fasthttp/websocket"
 	"github.com/valyala/fasthttp"
 	"wsl.test/chat"
-	"wsl.test/shared"
+	"wsl.test/internal"
 	"wsl.test/utils"
 )
 
@@ -39,55 +40,57 @@ func wsHandler(ctx *fasthttp.RequestCtx, controller *chat.Controller) {
 			return
 		}
 
-		u := chat.UserList[user.ID]
+		u := chat.GlobalUserList[user.ID]
 		if u == nil {
 			conn.WriteMessage(websocket.TextMessage, []byte("Invalid user"))
 			return
 		} else {
-			connection := NewConnection(conn, u)
+			wsConnection := WSConnection{Conn: conn}
+			connection := NewAPIConnection(wsConnection, u)
 			connection.Handle(ctx, controller)
 		}
 
 	})
 }
 
-type Connection struct {
-	conn      *websocket.Conn
+type APIConnection struct {
+	conn      internal.Transport
 	Ctx       context.Context
 	User      *chat.User
 	ID        string
-	cachedMap map[string]chan<- shared.TypeMessage
-	ReceiveCh chan shared.Message
+	cachedMap map[string]chan<- internal.TypeMessage
+	ReceiveCh chan internal.Message
 	cancel    context.CancelFunc
+	mx        sync.RWMutex
 }
 
-func (con *Connection) ReceiveChan() chan shared.Message {
-	return con.ReceiveCh
+func (api *APIConnection) ReceiveChan() chan internal.Message {
+	return api.ReceiveCh
 }
 
-func (con *Connection) GetUserId() string {
-	return con.User.ID
+func (api *APIConnection) GetUserId() string {
+	return api.User.ID
 }
 
-func (con *Connection) GetID() string {
-	return con.ID
+func (api *APIConnection) GetID() string {
+	return api.ID
 }
 
-func (con *Connection) GetCTX() context.Context {
-	return con.Ctx
+func (api *APIConnection) GetCTX() context.Context {
+	return api.Ctx
 }
 
-func (con *Connection) Handle(netCtx *fasthttp.RequestCtx, controller *chat.Controller) {
+func (api *APIConnection) Handle(netCtx *fasthttp.RequestCtx, controller *chat.Controller) {
 	fmt.Println("Handling connection")
-	defer con.conn.Close()
+	defer api.conn.Close()
 	go func() {
 		for {
 			select {
-			case message := <-con.ReceiveCh:
-				logger.InfoContext(con.Ctx, "Received message", slog.Any("message", message))
-				logger.InfoContext(con.Ctx, "Count of message in channel: ", slog.Any("count", len(con.ReceiveCh)))
-				con.conn.WriteJSON(message)
-			case <-con.Ctx.Done():
+			case message := <-api.ReceiveCh:
+				logger.InfoContext(api.Ctx, "Received message", slog.Any("message", message))
+				logger.InfoContext(api.Ctx, "Count of message in channel: ", slog.Any("count", len(api.ReceiveCh)))
+				api.conn.WriteJSON(message)
+			case <-api.Ctx.Done():
 				break
 			}
 		}
@@ -95,52 +98,100 @@ func (con *Connection) Handle(netCtx *fasthttp.RequestCtx, controller *chat.Cont
 	for {
 		select {
 		case <-netCtx.Done():
-			con.cancel()
-			break
-		case <-con.Ctx.Done():
+			api.cancel()
 			break
 		default:
-			var message shared.TypeMessage
-			_, msgBytes, err := con.conn.ReadMessage()
-			if err != nil {
-				fmt.Errorf("error after read ws message : %v", err)
-			}
-			err = json.Unmarshal(msgBytes, &message)
-			if err != nil {
-				fmt.Errorf("error after parse message : %v", err)
-			}
-			fmt.Println(message)
-			switch message.Type {
-			case shared.Broadcast:
-				fmt.Println(message)
-				if br := con.cachedMap[message.ChatID]; br != nil {
-					br <- message
-					continue
-				}
-				invoice := chat.Invoice{ChatID: message.ChatID, UserID: con.User.ID}
-				controller.ConnectToChat(invoice)
-				if newChannel := controller.GetChatBroadcastChannel(message.ChatID, con); newChannel != nil {
-					newChannel <- message
-					con.cachedMap[message.ChatID] = newChannel
-				}
-
-			}
+			handler := api.conn.Processor()
+			handler()
 
 		}
 	}
 
 }
 
-func NewConnection(conn *websocket.Conn, user *chat.User) *Connection {
+func (api *APIConnection) Register(c *chat.Controller, invoice chat.Invoice, message internal.TypeMessage) {
+	c.ConnectToChat(invoice)
+	eventC := make(chan chat.Event)
+	err := c.Subscribe(api.User.ID, eventC)
+	if err != nil {
+		return
+	} else {
+		select {
+		case event := <-eventC:
+			switch event.Type {
+			case chat.Completed:
+				if chatChan := c.GetRegisterConnection(invoice.ChatID, api); chatChan != nil {
+					chatChan <- message
+					api.mx.Lock()
+					api.cachedMap[invoice.ChatID] = chatChan
+					api.mx.Unlock()
+				}
+			case chat.Failed:
+				return
+			}
+		}
+	}
+
+}
+
+func NewAPIConnection(conn internal.Transport, user *chat.User) *APIConnection {
 	id := utils.IDGenerator.Generate()
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Connection{
+	return &APIConnection{
 		conn:      conn,
-		ReceiveCh: make(chan shared.Message, 64),
+		ReceiveCh: make(chan internal.Message, 64),
 		ID:        id,
 		Ctx:       ctx,
 		cancel:    cancel,
-		cachedMap: make(map[string]chan<- shared.TypeMessage),
+		cachedMap: make(map[string]chan<- internal.TypeMessage),
 		User:      user,
+		mx:        sync.RWMutex{},
 	}
+}
+
+type WSConnection struct {
+	Conn *websocket.Conn
+	a    *APIConnection
+	c    *chat.Controller
+}
+
+func (W WSConnection) Close() error {
+	return W.Conn.Close()
+}
+
+func (W WSConnection) ReadMessage() (messageType int, p []byte, err error) {
+	return W.Conn.ReadMessage()
+}
+
+func (W WSConnection) WriteJSON(msg internal.Message) error {
+	return W.Conn.WriteJSON(msg)
+}
+func (W WSConnection) Processor() func() {
+	return func() {
+
+		var message internal.TypeMessage
+		_, msgBytes, err := W.ReadMessage()
+		if err != nil {
+			fmt.Errorf("error after read ws message : %v", err)
+		}
+		err = json.Unmarshal(msgBytes, &message)
+		if err != nil {
+			fmt.Errorf("error after parse message : %v", err)
+		}
+		fmt.Println(message)
+		switch message.Type {
+		case internal.Broadcast:
+			fmt.Println(message)
+			W.a.mx.RLock()
+			if br := W.a.cachedMap[message.ChatID]; br != nil {
+				br <- message
+			} else {
+				invoice := chat.Invoice{ChatID: message.ChatID, UserID: W.a.User.ID}
+				go W.a.Register(W.c, invoice, message)
+			}
+			W.a.mx.RUnlock()
+
+		}
+	}
+
 }

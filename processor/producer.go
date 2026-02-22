@@ -1,14 +1,16 @@
-package kafka
+package processor
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime"
 	"sync"
 	"time"
 
+	tools "github.com/amjealousy/chat-utils"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -19,23 +21,30 @@ type ProducerPool struct {
 	dlqWriter *kafka.Writer
 	wg        sync.WaitGroup
 	logger    *slog.Logger
+	testFlag  bool
 }
 
-func NewProducerPool(brokers []string, logger *slog.Logger) *ProducerPool {
+func NewProducerPool(config tools.Config, testFlag bool) *ProducerPool {
+	h := slog.NewTextHandler(os.Stdout, nil)
+	logger := slog.New(h).
+		WithGroup("program").
+		With("", "ProducerPool")
 	pool := &ProducerPool{
 		historyCh: make(chan HistoryMessage, 50000),
 		dlqCh:     make(chan DLQMessage, 1000),
 		logger:    logger,
+		testFlag:  testFlag,
 	}
+	if !testFlag {
+		for i := 0; i < runtime.NumCPU(); i++ {
+			w := newKafkaWriter(config.Brokers, config.Topics[1].Name)
+			pool.writers = append(pool.writers, w)
+		}
 
-	for i := 0; i < runtime.NumCPU(); i++ {
-		w := newKafkaWriter(brokers, "chat-server-history")
-		pool.writers = append(pool.writers, w)
+		pool.dlqWriter = newKafkaWriter(config.Brokers, config.Topics[2].Name)
+
+		pool.Start()
 	}
-
-	pool.dlqWriter = newKafkaWriter(brokers, "chat-server-history-dlq")
-
-	pool.Start()
 	return pool
 }
 

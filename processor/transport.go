@@ -1,4 +1,4 @@
-package kafka
+package processor
 
 import "encoding/json"
 

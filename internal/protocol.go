@@ -1,15 +1,5 @@
-package shared
+package internal
 
-import (
-	"context"
-)
-
-type IConnection interface {
-	GetID() string
-	GetCTX() context.Context
-	ReceiveChan() chan Message
-	GetUserId() string
-}
 type Message struct {
 	ChatID string `json:"chatID"`
 	From   string `json:"from"`
@@ -21,6 +11,7 @@ type MSGType string
 
 const (
 	Broadcast MSGType = "broadcast"
+	Mention   MSGType = "@"
 )
 
 type TypeMessage struct {

@@ -12,9 +12,10 @@ import (
 	"wsl.test/chat"
 )
 
-func helloHandler(ctx *fasthttp.RequestCtx) {
-	name := "Kirill"
-	fmt.Fprintf(ctx, "Привет, %s!", name)
+func HealthHandler(ctx *fasthttp.RequestCtx) {
+	ctx.SetStatusCode(200)
+	ctx.SetContentType("text/plain; charset=utf-8")
+	ctx.SetBodyString(`{"alive": true}`)
 }
 func ChatCreateHandler(ctx *fasthttp.RequestCtx, controller *chat.Controller) {
 	ctx.SetContentType("application/json")
@@ -56,9 +57,8 @@ type Server struct {
 	logger     *slog.Logger
 }
 
-func (server *Server) BindController(controller *chat.Controller) {
-	server.controller = controller
-
+func (s *Server) BindController(controller *chat.Controller) {
+	s.controller = controller
 }
 func NewServer() *Server {
 	server := new(Server)
@@ -68,46 +68,63 @@ func NewServer() *Server {
 	server.logger = base.With(
 		slog.String("component", "HttpServer"),
 	)
-	server.route.GET("/hello", helloHandler)
+	server.route.GET("/health", HealthHandler)
 	server.route.GET("/ws", server.WSChatWrapper)
 	server.route.POST("/chat-server/create/{chatID}", server.ChatCreateWrapper)
 	server.route.POST("/user/create", server.UserCreateWrapper)
+	server.route.POST("/user/sse", server.SSEChatWrapper)
+	server.route.GET("/user/sse", server.SSEPage)
 	return server
 }
 
-func (server *Server) Run() {
-	server.ctx, server.cnl = context.WithCancel(context.Background())
-	server.logger.With(
+func (s *Server) Run() {
+	s.ctx, s.cnl = context.WithCancel(context.Background())
+	s.logger.With(
 		[]any{
-			"port", server.ports[0],
+			"port", s.ports[0],
 		},
 	)
-	server.logger.InfoContext(server.ctx, "Listening on port "+server.ports[0])
-	err := fasthttp.ListenAndServe(server.ports[0], server.route.Handler)
-	server.logger.InfoContext(server.ctx, "Check server error", err)
+	s.logger.InfoContext(s.ctx, "Listening on port "+s.ports[0])
+	err := fasthttp.ListenAndServe(s.ports[0], s.route.Handler)
+	s.logger.InfoContext(s.ctx, "Check server error", err)
 	if err != nil {
 
 		panic(err)
 	}
 	select {
-	case <-server.ctx.Done():
+	case <-s.ctx.Done():
 		return
 	}
 }
 
-func (server *Server) Stop() {
-	server.cnl()
+func (s *Server) Stop() {
+	s.cnl()
 }
 
-func (server *Server) WSChatWrapper(ctx *fasthttp.RequestCtx) {
-	server.logger.InfoContext(server.ctx, "WSChatWrapper called")
-	wsHandler(ctx, server.controller)
+func (s *Server) SSEPage(ctx *fasthttp.RequestCtx) {
+	htmlContent, err := os.ReadFile("./templates/sse.html")
+	if err != nil {
+		ctx.Error("404 Not Found", fasthttp.StatusNotFound)
+		fmt.Printf("Ошибка чтения файла: %v\n", err)
+		return
+	}
+
+	ctx.SetContentType("text/html; charset=utf-8")
+	ctx.Write(htmlContent)
 }
 
-func (server *Server) UserCreateWrapper(ctx *fasthttp.RequestCtx) {
-	UserCreateHandler(ctx, server.controller)
+func (s *Server) WSChatWrapper(ctx *fasthttp.RequestCtx) {
+	s.logger.InfoContext(s.ctx, "WSChatWrapper called")
+	wsHandler(ctx, s.controller)
+}
+func (s *Server) SSEChatWrapper(ctx *fasthttp.RequestCtx) {
+	s.logger.InfoContext(s.ctx, "SSEChatWrapper called")
+	sseHandler(ctx, s.controller)
+}
+func (s *Server) UserCreateWrapper(ctx *fasthttp.RequestCtx) {
+	UserCreateHandler(ctx, s.controller)
 }
 
-func (server *Server) ChatCreateWrapper(ctx *fasthttp.RequestCtx) {
-	ChatCreateHandler(ctx, server.controller)
+func (s *Server) ChatCreateWrapper(ctx *fasthttp.RequestCtx) {
+	ChatCreateHandler(ctx, s.controller)
 }

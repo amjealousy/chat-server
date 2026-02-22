@@ -4,7 +4,7 @@ import (
 	"wsl.test/utils"
 )
 
-var UserList = map[string]*User{}
+var GlobalUserList = map[string]*User{}
 
 type User struct {
 	ID   string `json:"id"`
@@ -16,6 +16,6 @@ func CreateUser(fqdn string) *User {
 		FQDN: fqdn,
 		ID:   utils.IDGenerator.Generate(),
 	}
-	UserList[u.ID] = u
+	GlobalUserList[u.ID] = u
 	return u
 }

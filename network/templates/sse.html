@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SSE Chat</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <style>
+        body { font-family: Arial; }
+        ul { list-style: none; padding: 0; }
+        li { padding: 10px; border: 1px solid #ccc; margin: 5px 0; }
+    </style>
+</head>
+<body>
+<h1>Чат</h1>
+<ul id="list"></ul>
+<script>
+    const eventSrc = new EventSource(window.location.origin + "/user/sse/stream");
+    const list = document.getElementById("list");
+    eventSrc.onmessage = (event) => {
+        const li = document.createElement("li");
+        li.textContent = event.data;
+        list.appendChild(li);
+    };
+    eventSrc.onerror = () => {
+        console.log("Connection closed");
+        eventSrc.close();
+    };
+</script>
+</body>
+</html>

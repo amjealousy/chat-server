@@ -6,17 +6,20 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
-	"wsl.test/shared"
+	"wsl.test/internal"
+	"wsl.test/processor"
 )
 
 type Controller struct {
 	addCh  chan Invoice
 	delCh  chan Invoice
 	mx     *sync.RWMutex
-	chats  map[string]*Chat
+	Chats  map[string]*Chat
 	logger *slog.Logger
 	sentry *Sentry
+	kpool  *processor.ProducerPool
 }
 type EventType = string
 
@@ -46,7 +49,6 @@ func (s *Sentry) Notify(userID string, ev Event) {
 	case userC <- ev:
 	default:
 	}
-
 }
 
 func (c *Controller) Subscribe(userId string, ch chan Event) error {
@@ -62,18 +64,20 @@ func (c *Controller) Subscribe(userId string, ch chan Event) error {
 	return nil
 }
 
-func NewController(format io.Writer) *Controller {
+func NewController(format io.Writer, pool *processor.ProducerPool) *Controller {
 	base := slog.New(slog.NewJSONHandler(format, nil))
 	logger := base.With(
-		slog.String("component", "ChatController"),
+		slog.String("O", "[ChatController]"),
 	)
 	chats := make(map[string]*Chat)
 	return &Controller{
 		addCh:  make(chan Invoice),
 		delCh:  make(chan Invoice),
-		chats:  chats,
+		Chats:  chats,
 		logger: logger,
 		mx:     &sync.RWMutex{},
+		kpool:  pool,
+		sentry: NewSentry(),
 	}
 }
 
@@ -85,13 +89,13 @@ type Invoice struct {
 func (c *Controller) Start(ctx context.Context) {
 	c.logger.InfoContext(ctx, "Started")
 	defer c.logger.InfoContext(ctx, "Stopped")
-	go c.Listener()
+	go c.Listener(ctx)
 	select {
 	case <-ctx.Done():
 		c.logger.InfoContext(ctx, "Ctx canceled")
 	}
 }
-func (c *Controller) Listener() {
+func (c *Controller) Listener(ctx context.Context) {
 	for {
 		select {
 		case invoice := <-c.addCh:
@@ -99,6 +103,8 @@ func (c *Controller) Listener() {
 			c.addToChat(invoice)
 		case invoice := <-c.delCh:
 			c.delFromChat(invoice)
+		case <-ctx.Done():
+			break
 		default:
 		}
 	}
@@ -108,14 +114,14 @@ func (c *Controller) delFromChat(invoice Invoice) {
 	if invoice.UserID == "" {
 		return
 	}
-	if chat := c.chats[invoice.ChatID]; chat != nil {
+	if chat := c.Chats[invoice.ChatID]; chat != nil {
 		go chat.RemoveMember(invoice.UserID)
 	}
 }
 
 func (c *Controller) addToChat(invoice Invoice) {
 	var event Event
-	if chat := c.chats[invoice.ChatID]; chat != nil {
+	if chat := c.Chats[invoice.ChatID]; chat != nil {
 		c.mx.Lock()
 		defer c.mx.Unlock()
 		status := chat.AddMember(invoice.UserID)
@@ -133,13 +139,13 @@ func (c *Controller) addToChat(invoice Invoice) {
 	}
 	c.sentry.Notify(invoice.UserID, event)
 }
-func (c *Controller) GetRegisterConnection(chatID string, connection shared.IConnection) chan<- shared.TypeMessage {
+func (c *Controller) GetRegisterConnection(chatID string, connection internal.IAPIConnection) chan internal.TypeMessage {
 	c.mx.RLock()
 	defer c.mx.RUnlock()
-	c.logger.InfoContext(context.Background(), "[Controller.GetRegisterConnection] list of chats:", slog.Any("chats", c.chats))
-	if chat := c.chats[chatID]; chat != nil {
-		if member := chat.members[connection.GetUserId()]; member != nil {
-			return chat.messageChan
+	c.logger.InfoContext(context.Background(), "[Controller.GetRegisterConnection] list of chats:", slog.Any("chats", c.Chats))
+	if chat := c.Chats[chatID]; chat != nil {
+		if member := chat.Members[connection.GetUserId()]; member != nil {
+			return chat.MessageChan
 		}
 	}
 	c.logger.InfoContext(context.Background(), "Chat not found in", slog.String("chatID", chatID))
@@ -148,10 +154,10 @@ func (c *Controller) GetRegisterConnection(chatID string, connection shared.ICon
 func (c *Controller) CreateChat(chatID string) bool {
 	c.mx.Lock()
 	defer c.mx.Unlock()
-	if chat := c.chats[chatID]; chat != nil {
+	if chat := c.Chats[chatID]; chat != nil {
 		return false
 	}
-	c.chats[chatID] = NewChat(c, chatID)
+	c.Chats[chatID] = NewChat(c, chatID)
 	return true
 }
 func (c *Controller) ConnectToChat(invoice Invoice) {
@@ -160,3 +166,16 @@ func (c *Controller) ConnectToChat(invoice Invoice) {
 func (c *Controller) SseConnect(invoice Invoice) {}
 
 type CallBack func()
+
+func (c *Controller) SendHistory(message internal.TypeMessage) {
+	c.kpool.Post(ConvertHistoryMessage(message))
+}
+func ConvertHistoryMessage(message internal.TypeMessage) processor.HistoryMessage {
+	return processor.HistoryMessage{
+		Seq:    message.Cseq,
+		UserID: message.From,
+		ChatID: message.ChatID,
+		Text:   message.Text,
+		Ts:     time.Now().Unix(),
+	}
+}

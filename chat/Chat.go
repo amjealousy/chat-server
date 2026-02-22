@@ -2,37 +2,36 @@ package chat
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 
-	"wsl.test/shared"
+	"wsl.test/internal"
 	"wsl.test/utils"
 )
 
 type Chat struct {
-	ID      string
-	mx      sync.RWMutex
-	members map[string]*Member
-	sseMember
+	ID          string
+	mx          sync.RWMutex
+	Members     map[string]*Member
 	seq         atomic.Uint64
-	messageChan chan shared.TypeMessage
+	MessageChan chan internal.TypeMessage
 	brakeCtx    context.Context
 	brakeCancel context.CancelFunc
 	c           *Controller
 }
 
 func (c *Chat) RunMessageLoop() bool {
-	chatSeq := utils.SeqHistoryChan(c.messageChan)
+	chatSeq := utils.SeqHistoryChan(c.MessageChan)
+	chatSeqWithCtx := utils.WithContext(c.brakeCtx, chatSeq)
 	go func() {
-		chatSeqWithCtx := utils.WithContext(c.brakeCtx, chatSeq)
 		for tmsg := range chatSeqWithCtx {
 			c.c.logger.InfoContext(c.brakeCtx, "Received message", slog.Any("message", tmsg))
 			c.Broadcast(tmsg)
-
+			c.c.SendHistory(tmsg)
 		}
 	}()
+
 	return true
 }
 
@@ -41,9 +40,9 @@ func NewChat(c *Controller, id string) *Chat {
 	chat := &Chat{
 		ID:          id,
 		mx:          sync.RWMutex{},
-		members:     make(map[string]*Member),
+		Members:     make(map[string]*Member),
 		seq:         atomic.Uint64{},
-		messageChan: make(chan shared.TypeMessage, 512),
+		MessageChan: make(chan internal.TypeMessage, 512),
 		brakeCtx:    chatCtx,
 		brakeCancel: cancel,
 		c:           c,
@@ -56,57 +55,40 @@ func (c *Chat) AddMember(user string) bool {
 	c.mx.Lock()
 	defer c.mx.Unlock()
 	member := NewMember(c.ID, user)
-	c.members[member.UserID] = member
+	c.Members[member.UserID] = member
 	return true
 }
 
 func (c *Chat) RemoveMember(userId string) {
 	c.mx.Lock()
 	defer c.mx.Unlock()
-	c.members[userId] = nil
+	c.Members[userId] = nil
 }
-func (c *Chat) RemoveConnection(userId string, conn shared.IConnection) {
+func (c *Chat) RemoveConnection(userId string, conn internal.IAPIConnection) {
 	c.mx.Lock()
 	defer c.mx.Unlock()
-	if member := c.members[userId]; member != nil {
+	if member := c.Members[userId]; member != nil {
 		member.Connection = nil
 	}
 }
+func (c *Chat) StopChat() {
+	c.brakeCancel()
+}
 
-//func (c *Chat) reader(m *Member) {
-//	defer c.RemoveConnection(m.ChatID, m.Connection)
-//	for {
-//		select {
-//		case <-m.Connection.GetCTX().Done():
-//			return
-//		default:
-//			select {
-//			case msg := <-m.RequestChan:
-//				fmt.Println("Chat reach the message from ", m.UserID)
-//				c.Broadcast(m, msg)
-//
-//			}
-//		}
-//	}
-//}
+func (c *Chat) Broadcast(msg internal.TypeMessage) {
 
-func (c *Chat) Broadcast(msg shared.TypeMessage) {
 	c.mx.RLock()
 	defer c.mx.RUnlock()
-	fmt.Println("Members list ", c.members)
 	c.seq.Add(1)
-
-	for _, member := range c.members {
-		fmt.Println("broadcast msg", msg)
+	for _, member := range c.Members {
 		if member.UserID == msg.From {
 			continue
 		}
 		select {
 		case member.Connection.ReceiveChan() <- msg.Message:
 
-			fmt.Println("Send to Member: ", member.UserID)
-
 		default:
+			c.c.logger.Info("Dropping message", slog.Any("message", msg), slog.String("to", member.UserID))
 		}
 	}
 

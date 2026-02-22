@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"iter"
 )
 
@@ -10,6 +11,7 @@ func WithContext[T any](ctx context.Context, s iter.Seq[T]) iter.Seq[T] {
 		s(func(v T) bool {
 			select {
 			case <-ctx.Done():
+				fmt.Println("[WithContext] Context cancelled")
 				return false
 			default:
 				return yield(v)

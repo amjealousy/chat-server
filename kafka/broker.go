@@ -1,3 +1,0 @@
-package kafka
-
-//TODO LAUNCH KAFKA FROM CODE
